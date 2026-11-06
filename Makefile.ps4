@@ -1,0 +1,50 @@
+# OpenOrbis build of the recompiled game.  Run on the OWNER'S machine (needs out/ = generated lift, see scripts/10_lift_all.sh):
+#   export OO_PS4_TOOLCHAIN=/path/to/OpenOrbis/PS4Toolchain ;  make -f Makefile.ps4 -j$(nproc)
+# Targets: eboot.bin (fake-self), pkg.gp4, <CONTENT_ID>.pkg.   `make -f Makefile.ps4 clean` removes build output.
+TITLE      := Nina PS4 Port
+VERSION    := 1.00
+TITLE_ID   := NINA00001
+CONTENT_ID := IV0000-NINA00001_00-NINAPS4PORT00000
+LIBS       := -lc -lm -lkernel -lc++ -lSceVideoOut -lScePad -lSceUserService -lSceAudioOut
+
+TC    := $(OO_PS4_TOOLCHAIN)
+CDIR  := linux
+OBJD  := obj_ps4
+CC    := clang
+LD    := ld.lld
+COMMON := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -isysroot $(TC) -isystem $(TC)/include -w -std=gnu11 -DRT_PS4 -DRT_ORBIS -I. -Iout
+HOSTFLAGS := $(COMMON) -O2           # runtime + host layer + rasteriser: speed matters
+GENFLAGS  := $(COMMON) -O1           # ~70 generated parts (~30k lifted insns each): -O1 measured 12 s / part
+LDFLAGS := -m elf_x86_64 -pie --script $(TC)/link.x --eh-frame-hdr -L$(TC)/lib
+
+HOSTSRC := rt.c win32_shim.c host_win32.c host_resources.c host_threads.c host_user32.c host_gdi.c host_dinput.c host_ddraw.c host_dmusic.c host_audio.c \
+           input_map.c gfx_soft.c api_stubs_generated.c modules_lithtech.c ps4_main.c ps4_video.c ps4_pad.c ps4_audio.c
+GENSRC  := $(wildcard out/*.c)
+HOSTOBJ := $(addprefix $(OBJD)/,$(HOSTSRC:.c=.o))
+GENOBJ  := $(addprefix $(OBJD)/,$(notdir $(GENSRC:.c=.o)))
+LIBMODULES := $(wildcard sce_module/*)
+ASSETS     := $(wildcard assets/*)          # optional: put Nina.rez etc. here to bake them into /app0 (or copy to /data/nina on the console)
+
+all: $(CONTENT_ID).pkg
+$(OBJD)/%.o: %.c rt.h gfx.h input_map.h ; @mkdir -p $(OBJD); $(CC) $(HOSTFLAGS) -c $< -o $@
+$(OBJD)/%.o: out/%.c rt.h ; @mkdir -p $(OBJD); $(CC) $(GENFLAGS) -c $< -o $@
+$(OBJD)/nina.elf: $(HOSTOBJ) $(GENOBJ) ; $(LD) $(HOSTOBJ) $(GENOBJ) -o $@ $(LDFLAGS) $(LIBS) $(TC)/lib/crt1.o
+eboot.bin: $(OBJD)/nina.elf ; $(TC)/bin/$(CDIR)/create-fself -in=$< -out=$(OBJD)/nina.oelf --eboot eboot.bin --paid 0x3800000000000011
+sce_sys/param.sfo: Makefile.ps4
+	@mkdir -p sce_sys; $(TC)/bin/$(CDIR)/PkgTool.Core sfo_new $@
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ APP_TYPE --type Integer --maxsize 4 --value 1
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ APP_VER --type Utf8 --maxsize 8 --value '$(VERSION)'
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ ATTRIBUTE --type Integer --maxsize 4 --value 0
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value 0
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
+	$(TC)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
+sce_sys/icon0.png sce_sys/about/right.sprx sce_module/libc.prx: ; @echo "run scripts/40_pkg_skeleton.sh first (creates icon0.png, about/right.sprx, sce_module/*)"; false
+pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png $(LIBMODULES) $(ASSETS)
+	$(TC)/bin/$(CDIR)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
+$(CONTENT_ID).pkg: pkg.gp4 ; $(TC)/bin/$(CDIR)/PkgTool.Core pkg_build $< .
+clean: ; rm -rf $(OBJD) eboot.bin pkg.gp4 $(CONTENT_ID).pkg sce_sys/param.sfo
+.PHONY: all clean
