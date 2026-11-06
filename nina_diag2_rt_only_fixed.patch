@@ -1,0 +1,41 @@
+--- a/rt.c
++++ b/rt.c
+@@ -25,10 +25,18 @@
+ }
++static void rt_dump_calls(int count);
++
+ void rt_dump_stack(void) {
+     if (!G) return; rt_log("  guest stack scan (return-address candidates, innermost first):"); int shown = 0;
+-    for (uint32_t sp = ESP; sp < GUEST_STACK_TOP && sp < ESP + 0x2000 && shown < 24; sp += 4) { uint32_t v = RD32(sp);
++    for (uint32_t sp = ESP; sp + 4 <= RT_GUEST_WINDOW && sp < ESP + 0x1000 && shown < 32; sp += 4) { uint32_t v = RD32(sp);
+         for (int i = 0; i < nmods; i++) if (v >= mods[i]->base + 0x1000 && v < mods[i]->base + mods[i]->size_of_image) {
+-            if (v >= 5 && (RD8(v - 5) == 0xE8 || (v >= 6 && RD8(v - 6) == 0xFF) || (v >= 3 && RD8(v - 2) == 0xFF) || (v >= 3 && RD8(v - 3) == 0xFF))) { rt_log("    [esp+%x] %08x = %s+%x", sp - ESP, v, mods[i]->file, v - mods[i]->base); shown++; }
++            int callish = v >= 6 && (RD8(v - 5) == 0xE8 || RD8(v - 6) == 0xFF || RD8(v - 2) == 0xFF || RD8(v - 3) == 0xFF || RD8(v - 7) == 0xFF);
++            if (callish) { rt_log("    [esp+%x] %08x = %s+%x", sp - ESP, v, mods[i]->file, v - mods[i]->base); shown++; }
+             break; } }
++    rt_log("  esp=%08x (%s)", ESP, (ESP >= GUEST_STACK_TOP - GUEST_STACK_SIZE && ESP <= GUEST_STACK_TOP) ? "main stack" : "NOT the main stack -> a guest thread / switched stack");
++    { /* Nina CSHELL globals: g_pLTClient @0xDD5FE0, copy @0xDD5FBC; shell object = esi, settings member = esi+0x345bc, flags @esi+0x34e08 */
++      uint32_t e = ESI; rt_log("  cshell g_client[dd5fe0]=%08x [dd5fbc]=%08x | esi=%08x settings@%08x: [0]=%08x [4]=%08x [+220]=%08x flags[esi+34e08]=%02x",
++          RD32(0xDD5FE0), RD32(0xDD5FBC), e, e + 0x345bc, RD32(e + 0x345bc), RD32(e + 0x345c0), RD32(e + 0x345bc + 0x220), RD8(e + 0x34e08)); }
++    rt_dump_calls(120);
+ }
+ void rt_trap(uint32_t addr, const char *msg) {
+     char b[700];
+@@ -158,7 +166,17 @@
+     return 0;
+ }
+ 
++#define GC_RING 192
++static uint32_t gc_ring[GC_RING]; static unsigned gc_pos;
++static void gc_name(uint32_t v, char *o, size_t n) { for (int i = 0; i < nmods; i++) if (v >= mods[i]->base && v < mods[i]->base + mods[i]->size_of_image) { snprintf(o, n, "%s+%x", mods[i]->file, v - mods[i]->base); return; } snprintf(o, n, "%08x", v); }
++static void rt_dump_calls(int count) {                          /* last indirect guest calls (vtable / function-pointer targets), oldest first */
++    if (count > GC_RING) count = GC_RING; rt_log("  last %d indirect guest calls (oldest first):", count); char b[80], line[300]; int o = 0; line[0] = 0;
++    for (int k = count; k >= 1; k--) { if (gc_pos < (unsigned)k) continue; gc_name(gc_ring[(gc_pos - k) % GC_RING], b, sizeof b); o += snprintf(line + o, sizeof line - o, " %s", b);
++        if (o > 200) { rt_log("   %s", line); o = 0; line[0] = 0; } }
++    if (o) rt_log("   %s", line);
++}
+ void guest_call(uint32_t a) {
++    if (a < IMPORT_BASE) gc_ring[gc_pos++ % GC_RING] = a;
+     if (a >= IMPORT_BASE) { api_dispatch(a - IMPORT_BASE); return; }
+     for (int i = 0; i < nmods; i++)
+         if (a >= mods[i]->base && a < mods[i]->base + mods[i]->size_of_image) { if (mods[i]->dispatch(a)) return; break; }
